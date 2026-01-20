@@ -1,0 +1,9 @@
+# Compiled files
+*.o
+*.out
+a.out
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
