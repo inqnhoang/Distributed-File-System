@@ -1,5 +1,6 @@
 #include "efs.h"
-///// Helper Functions /////
+#include "fs.h"
+
 int get_fd_info(fs_node_t* fs, int i, int section) // 4 SECTIONS (BYTES): FILE_LENGTH (4) | BLOCK 0 (4) | BLOCK 1 (4) | BLOCK 2 (4) | 
 {
     if (i < 0 || i >= N_FILE_DESC) return -1;
@@ -353,7 +354,7 @@ int f_write(fs_node_t* fs, int i, int m, int n)
     memcpy(fs->O, fs->D[0], BLOCK_SIZE);
     
     int bytes_written = 0;
-    int max_file_size = 3 * BLOCK_SIZE;  // 1536 bytes max
+    int max_file_size = 3 * BLOCK_SIZE;
 
     while (bytes_written < n && fs->OFT[i].curr_pos < max_file_size) {
         int buf_offset = fs->OFT[i].curr_pos % BLOCK_SIZE;
@@ -364,28 +365,22 @@ int f_write(fs_node_t* fs, int i, int m, int n)
             fs->OFT[i].file_size = fs->OFT[i].curr_pos;
         }
 
-        // Check if we've filled the current block
-        if (fs->OFT[i].curr_pos % BLOCK_SIZE == 0 && bytes_written < n - 1) {
+        if (fs->OFT[i].curr_pos % BLOCK_SIZE == 0 && bytes_written < n) {
             int curr_fd_section = (fs->OFT[i].curr_pos / BLOCK_SIZE);
             
-            // Check if we've reached max file size (3 blocks)
             if (curr_fd_section >= 3) {
                 break;
             }
 
-            // Write current block to disk
             int curr_block = get_fd_info(fs, fs->OFT[i].fd, curr_fd_section);
             memcpy(fs->D[curr_block], fs->OFT[i].rw_buffer, BLOCK_SIZE);
 
-            // Get or allocate next block
             int next_block = get_fd_info(fs, fs->OFT[i].fd, curr_fd_section + 1);
 
             if (next_block != -1) {
-                // Block already allocated, load it
                 memcpy(fs->OFT[i].rw_buffer, fs->D[next_block], BLOCK_SIZE);
             } else {
-                // Need to allocate new block
-                for (int k = 8; k < N_BLOCKS; k++) {  // Start from block 8 (after directory)
+                for (int k = 8; k < N_BLOCKS; k++) {
                     if (get_bit_map_info(fs, k) == 0) {
                         next_block = k;
                         write_fd_info(fs, next_block, fs->OFT[i].fd, curr_fd_section + 1);
@@ -396,7 +391,6 @@ int f_write(fs_node_t* fs, int i, int m, int n)
                 }
                 
                 if (next_block == -1) {
-                    // No free blocks available
                     memcpy(fs->D[FD_BLOCK(fs->OFT[i].fd)], fs->I, BLOCK_SIZE);
                     memcpy(fs->D[0], fs->O, BLOCK_SIZE);
                     return bytes_written;
@@ -407,7 +401,6 @@ int f_write(fs_node_t* fs, int i, int m, int n)
         bytes_written++;
     }
 
-    // Write updated descriptor and bitmap back to disk
     memcpy(fs->D[FD_BLOCK(fs->OFT[i].fd)], fs->I, BLOCK_SIZE);
     memcpy(fs->D[0], fs->O, BLOCK_SIZE);
 
@@ -450,7 +443,10 @@ int read_memory(fs_node_t* fs, int m, int n)
     int bytes_read = 0;
 
     while (bytes_read < n && (m + bytes_read) < BLOCK_SIZE) {
-        printf("%c", fs->M[m + bytes_read]);
+        char c = fs->M[m + bytes_read];
+        if (c != '\0') {
+            printf("%c", c);
+        }
         bytes_read++;
     }
     printf("\n");
@@ -474,19 +470,21 @@ int write_memory(fs_node_t* fs, int m, char* string) {
 
 ///// INIT /////
 int init(fs_node_t* fs) {
-    fs->D[0][0] = 0xff;
-    memset(fs->D[0] + 1, 0, BLOCK_SIZE - 1);
+    memset(fs->D, 0, sizeof(fs->D));
 
-    memset(fs->D[1], 0, BLOCK_SIZE * 6);
+    fs->D[0][0] = 0xff;
+
+    memcpy(fs->I, fs->D[1], BLOCK_SIZE);
+    write_fd_info(fs, 0, 0, 1);
+    memcpy(fs->D[1], fs->I, BLOCK_SIZE);
 
     for (int i = 1; i < N_FILE_DESC; i++) {
         int fd_block = FD_BLOCK(i);
         int fd_offset = FD_OFFSET(i);
-
         byte * fd_pos = fs->D[fd_block][fd_offset];
-
+        
         for (int j = 0; j < 4; j++) {
-            *(fd_pos + j) = (-1 >> (j * BITS_PER_BYTE)) & 0xff; 
+            *(fd_pos + j) = 0xFF;
         }
     }
 
@@ -494,22 +492,21 @@ int init(fs_node_t* fs) {
     memset(fs->O, 0, sizeof(fs->O));
     memset(fs->M, 0, sizeof(fs->M));
 
-    memcpy(fs->O, fs->D[0], BLOCK_SIZE);
-
     fs->OFT[0].file_size = 0;
     fs->OFT[0].curr_pos = 0;
     fs->OFT[0].fd = 0;
+    memset(fs->OFT[0].rw_buffer, 0, BLOCK_SIZE);
+    memcpy(fs->O, fs->D[0], BLOCK_SIZE);
 
     memcpy(fs->I, fs->D[1], BLOCK_SIZE);
     write_fd_info(fs, 7, 0, 1);
     memcpy(fs->D[1], fs->I, BLOCK_SIZE);
 
-    seek(fs, 0, 0);
-
     for (int i = 1; i < 4; i++) {
         fs->OFT[i].fd = -1;
         fs->OFT[i].curr_pos = -1;
         fs->OFT[i].file_size = 0;
+        memset(fs->OFT[i].rw_buffer, 0, BLOCK_SIZE);
     } 
     
     return 0; 
@@ -520,25 +517,30 @@ int directory(fs_node_t* fs)
     int seek_err = seek(fs, 0, 0);
     if (seek_err < 0) return -1;
     
-    memcpy(fs->I, fs->D[1], BLOCK_SIZE);
-    
-    printf("=================== directory ====================\n");
-    
     for (int i = 0; i < BLOCK_SIZE / 8; i++) {
         char file_name[4];
         get_dir_info_name(fs, i, file_name);
 
         if (memcmp(file_name, "\0\0\0\0", 4) != 0) {
             int fd = get_dir_info_desc(fs, i);
+        
+            int file_size = -1;
+            int found_in_oft = 0;
             
-            // Load correct descriptor block if needed
-            if (fd >= 32) {
-                memcpy(fs->I, fs->D[1 + (fd / 32)], BLOCK_SIZE);
+            for (int j = 1; j < 4; j++) {
+                if (fs->OFT[j].fd == fd && fs->OFT[j].curr_pos != -1) {
+                    file_size = fs->OFT[j].file_size;
+                    found_in_oft = 1;
+                    break;
+                }
             }
             
-            int file_size = get_fd_info(fs, fd, 0);
-            printf("file_name: %s | index_field: %d | file size: %d\n", 
-                   file_name, fd, file_size);
+            if (!found_in_oft) {
+                memcpy(fs->I, fs->D[1 + (fd / 32)], BLOCK_SIZE);
+                file_size = get_fd_info(fs, fd, 0);
+            }
+            
+            printf("%s %d\n", file_name, file_size);
         }
     }
     

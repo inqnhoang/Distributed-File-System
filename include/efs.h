@@ -2,9 +2,6 @@
 #define EMULATED_FILE_SYSTEM_EFS_H
 
 #include <memory.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include "fs.h"
 
 int init(fs_node_t* fs);
